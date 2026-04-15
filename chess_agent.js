@@ -306,44 +306,45 @@ class MoveGenerator {
     }
 
     static generateSlidingMoves(board, sq, moves, onlyCaptures, directions) {
-        const row = Math.floor(sq / 8);
-        const col = sq % 8;
-        
-        for (const dir of directions) {
-            let target = sq + dir;
-            while (target >= 0 && target < 64) {
-                const targetRow = Math.floor(target / 8);
-                const targetCol = target % 8;
-                
-                // Check if we've wrapped around the board
-                const dRow = targetRow - row;
-                const dCol = targetCol - col;
-                if (Math.abs(dRow) > Math.abs(dir / 8) + 1 || Math.abs(dCol) > Math.abs(dir % 8) + 1) break;
-                if (dir % 8 !== 0 && Math.abs(dCol) !== Math.abs(dRow) && Math.abs(dRow) !== 0) break;
-                
+        const startRank = Math.floor(sq / 8);
+        const startFile = sq % 8;
+
+        // directions is expected to be an array of [dFile, dRank] pairs
+        for (const [dFile, dRank] of directions) {
+            let file = startFile + dFile;
+            let rank = startRank + dRank;
+
+            while (file >= 0 && file < 8 && rank >= 0 && rank < 8) {
+                const target = rank * 8 + file;
+
                 if (board.isEmpty(target)) {
-                    if (!onlyCaptures) moves.push({ from: sq, to: target });
-                } else {
-                    if (board.isEnemy(target)) {
-                        moves.push({ from: sq, to: target, capture: true });
+                    if (!onlyCaptures) {
+                        moves.push({ from: sq, to: target });
                     }
+                } else if (board.isEnemy(target)) {
+                    moves.push({ from: sq, to: target, capture: true });
+                    break; // cannot move past an enemy piece
+                } else {
+                    // own piece is blocking; cannot move further in this direction
                     break;
                 }
-                target += dir;
+
+                file += dFile;
+                rank += dRank;
             }
         }
     }
 
     static generateBishopMoves(board, sq, moves, onlyCaptures) {
-        this.generateSlidingMoves(board, sq, moves, onlyCaptures, [-9, -7, 7, 9]);
+        this.generateSlidingMoves(board, sq, moves, onlyCaptures, [[1, 1], [1, -1], [-1, 1], [-1, -1]]);
     }
 
     static generateRookMoves(board, sq, moves, onlyCaptures) {
-        this.generateSlidingMoves(board, sq, moves, onlyCaptures, [-8, -1, 1, 8]);
+        this.generateSlidingMoves(board, sq, moves, onlyCaptures, [[1, 0], [-1, 0], [0, 1], [0, -1]]);
     }
 
     static generateQueenMoves(board, sq, moves, onlyCaptures) {
-        this.generateSlidingMoves(board, sq, moves, onlyCaptures, [-9, -8, -7, -1, 1, 7, 8, 9]);
+        this.generateSlidingMoves(board, sq, moves, onlyCaptures, [[1, 1], [1, -1], [-1, 1], [-1, -1], [1, 0], [-1, 0], [0, 1], [0, -1]]);
     }
 
     static generateKingMoves(board, sq, moves, onlyCaptures) {
@@ -367,7 +368,7 @@ class MoveGenerator {
         }
         
         // Castling (only in non-capture mode)
-        if (!onlyCaptures && !board.whiteToMove === false) {
+        if (!onlyCaptures && (sq === 60 || sq === 4)) {
             // Simplified castling - just check basic conditions
             if (board.whiteToMove && sq === 60) {
                 if ((board.castling & 1) && board.isEmpty(61) && board.isEmpty(62)) {
@@ -440,13 +441,31 @@ class MoveExecutor {
         
         // Update castling rights
         if (pieceType === 1) {
-            // Pawn move - lose castling
+            // Pawn move - no castling rights change
         } else if (pieceType === 6) {
             // King move - lose both castling rights
             if (board.whiteToMove) {
                 newBoard.castling &= ~3;
             } else {
                 newBoard.castling &= ~12;
+            }
+        } else if (pieceType === 4) {
+            // Rook move - lose corresponding castling right
+            if (move.from === 63) newBoard.castling &= ~1; // White kingside rook
+            else if (move.from === 56) newBoard.castling &= ~2; // White queenside rook
+            else if (move.from === 7) newBoard.castling &= ~4; // Black kingside rook
+            else if (move.from === 0) newBoard.castling &= ~8; // Black queenside rook
+        }
+        
+        // Also clear castling rights if a rook is captured on its original square
+        const capturedPiece = board.squares[move.to];
+        if (capturedPiece !== 0) {
+            const capturedType = ((capturedPiece - 1) % 6) + 1;
+            if (capturedType === 4) {
+                if (move.to === 63) newBoard.castling &= ~1; // White kingside rook captured
+                else if (move.to === 56) newBoard.castling &= ~2; // White queenside rook captured
+                else if (move.to === 7) newBoard.castling &= ~4; // Black kingside rook captured
+                else if (move.to === 0) newBoard.castling &= ~8; // Black queenside rook captured
             }
         }
         
@@ -649,7 +668,12 @@ class Searcher {
         if (kingSq === -1) return true; // Should not happen
         
         // Check if any enemy piece can attack the king
+        // Need to generate moves for the opponent, so flip whiteToMove temporarily
+        const originalSide = board.whiteToMove;
+        board.whiteToMove = !originalSide;
         const enemyMoves = MoveGenerator.generateMoves(board, true);
+        board.whiteToMove = originalSide;
+        
         for (const move of enemyMoves) {
             if (move.to === kingSq) return true;
         }

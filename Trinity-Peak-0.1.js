@@ -362,14 +362,14 @@ function getBishopAttacks(sq, occLow, occHigh) {
     const occ = (BigInt(occHigh) << 32n) | BigInt(occLow >>> 0);
     const masked = (occ & bishopMask[sq]) * BigInt(bishopMagics[sq]);
     const index = Number(masked >> BigInt(bishopShifts[sq]));
-    return bishopTable[sq][index];
+    return BigInt(bishopTable[sq][index]);
 }
 
 function getRookAttacks(sq, occLow, occHigh) {
     const occ = (BigInt(occHigh) << 32n) | BigInt(occLow >>> 0);
     const masked = (occ & rookMask[sq]) * BigInt(rookMagics[sq]);
     const index = Number(masked >> BigInt(rookShifts[sq]));
-    return rookTable[sq][index];
+    return BigInt(rookTable[sq][index]);
 }
 
 function popcount(bb) {
@@ -569,10 +569,11 @@ class Position {
         // Handle en passant capture
         if (flags & 0x02) {
             const epSq = this.enPassant;
+            const capSq = epSq + (this.sideToMove === WHITE ? -8 : 8); // Captured pawn is one rank behind the EP square
             const epPawn = this.sideToMove === WHITE ? BLACK_PAWN : WHITE_PAWN;
-            newPos.board[epSq] = 0;
-            newPos.removeOccupancy(epSq);
-            newPos.zobristKey ^= BigInt(zobristPieces[epPawn - 1][epSq]);
+            newPos.board[capSq] = 0;
+            newPos.removeOccupancy(capSq);
+            newPos.zobristKey ^= BigInt(zobristPieces[epPawn - 1][capSq]);
         }
         
         // Place piece at destination
@@ -695,7 +696,7 @@ class Position {
             const bishopOcc = getBishopAttacks(sq, occLow, occHigh);
             if (bishopOcc & BigInt(occWhite)) {
                 for (let i = 0; i < 64; i++) {
-                    if ((occWhite & (1 << i)) && (bishopOcc & (1n << BigInt(i)))) {
+                    if ((occWhite & (1 << i)) && (bishopOcc & (ONE64 << BigInt(i)))) {
                         const p = this.board[i];
                         if (p === WHITE_BISHOP || p === WHITE_QUEEN) return true;
                     }
@@ -705,7 +706,7 @@ class Position {
             const rookOcc = getRookAttacks(sq, occLow, occHigh);
             if (rookOcc & BigInt(occWhite)) {
                 for (let i = 0; i < 64; i++) {
-                    if ((occWhite & (1 << i)) && (rookOcc & (1n << BigInt(i)))) {
+                    if ((occWhite & (1 << i)) && (rookOcc & (ONE64 << BigInt(i)))) {
                         const p = this.board[i];
                         if (p === WHITE_ROOK || p === WHITE_QUEEN) return true;
                     }
@@ -733,7 +734,7 @@ class Position {
             const bishopOcc = getBishopAttacks(sq, occLow, occHigh);
             if (bishopOcc & BigInt(occBlack)) {
                 for (let i = 0; i < 64; i++) {
-                    if ((occBlack & (1 << i)) && (bishopOcc & (1n << BigInt(i)))) {
+                    if ((occBlack & (1 << i)) && (bishopOcc & (ONE64 << BigInt(i)))) {
                         const p = this.board[i];
                         if (p === BLACK_BISHOP || p === BLACK_QUEEN) return true;
                     }
@@ -743,7 +744,7 @@ class Position {
             const rookOcc = getRookAttacks(sq, occLow, occHigh);
             if (rookOcc & BigInt(occBlack)) {
                 for (let i = 0; i < 64; i++) {
-                    if ((occBlack & (1 << i)) && (rookOcc & (1n << BigInt(i)))) {
+                    if ((occBlack & (1 << i)) && (rookOcc & (ONE64 << BigInt(i)))) {
                         const p = this.board[i];
                         if (p === BLACK_ROOK || p === BLACK_QUEEN) return true;
                     }
@@ -958,18 +959,19 @@ function generateKingMoves(pos, from, piece, moves, onlyCaptures, occBoth) {
     }
 }
 
-function encodeMove(from, to, piece, captured, flags, score) {
-    return (score << 24) | (flags << 16) | ((captured & 15) << 16) | ((piece & 15) << 12) | ((from & 63) << 6) | (to & 63);
+function encodeMove(from, to, piece, captured, flags, promotion) {
+    // Bit layout: score[31..24], flags[23..20], promotion[19..17], captured[16..13], piece[12..9], from[8..3], to[2..0]
+    return (flags << 20) | ((promotion & 7) << 17) | ((captured & 15) << 13) | ((piece & 15) << 9) | ((from & 63) << 3) | (to & 63);
 }
 
 function decodeMove(move) {
     return {
-        from: (move >> 6) & 63,
+        from: (move >> 3) & 63,
         to: move & 63,
-        piece: (move >> 12) & 15,
-        captured: (move >> 16) & 15,
-        promotion: (move >> 20) & 7,
-        flags: (move >> 24) & 255,
+        piece: (move >> 9) & 15,
+        captured: (move >> 13) & 15,
+        promotion: (move >> 17) & 7,
+        flags: (move >> 20) & 15,
         score: move >>> 24
     };
 }
@@ -1192,7 +1194,7 @@ function alphabeta(pos, depth, ply, alpha, beta, isPV) {
     }
     
     // Score moves
-    scoreMoves(pos, moves, ttEntry ? ttBestMoves[key] : 0);
+    scoreMoves(pos, moves, ttEntry ? ttBestMoves[key] : 0, ply);
     
     let bestScore = -SCORE_MATE;
     let bestLocalMove = 0;
@@ -1289,15 +1291,25 @@ function quiescence(pos, alpha, beta) {
     
     const moves = generateMoves(pos, true);
     
-    // Score captures
+    // Score captures using separate array
+    const scores = new Int32Array(moves.length);
     for (let i = 0; i < moves.length; i++) {
         const d = decodeMove(moves[i]);
-        moves[i] = (captureHistory[d.piece * 64 + d.to] << 8) | (d.captured * 10 - d.piece);
+        scores[i] = (captureHistory[d.piece * 64 + d.to] << 8) | (d.captured * 10 - d.piece);
     }
-    moves.sort((a, b) => b - a);
-    // Restore original moves
-    for (let i = 0; i < moves.length; i++) {
-        moves[i] = moves[i] & 0xFFFFFF;
+    
+    // Sort moves by score (descending)
+    for (let i = 0; i < moves.length - 1; i++) {
+        for (let j = i + 1; j < moves.length; j++) {
+            if (scores[j] > scores[i]) {
+                const tmpScore = scores[i];
+                scores[i] = scores[j];
+                scores[j] = tmpScore;
+                const tmpMove = moves[i];
+                moves[i] = moves[j];
+                moves[j] = tmpMove;
+            }
+        }
     }
     
     for (const move of moves) {
@@ -1314,7 +1326,9 @@ function quiescence(pos, alpha, beta) {
     return alpha;
 }
 
-function scoreMoves(pos, moves, ttMove) {
+function scoreMoves(pos, moves, ttMove, ply) {
+    const scores = new Int32Array(moves.length);
+    
     for (let i = 0; i < moves.length; i++) {
         const d = decodeMove(moves[i]);
         let score = 0;
@@ -1329,18 +1343,29 @@ function scoreMoves(pos, moves, ttMove) {
         }
         // Killer moves
         else {
-            const ki = (0) * 2; // Simplified: use current ply
+            const maxPly = (killerMoves.length / 2) | 0;
+            const safePly = Math.max(0, Math.min((ply | 0), maxPly - 1));
+            const ki = safePly * 2;
             if (moves[i] === killerMoves[ki]) score = 50000;
             else if (moves[i] === killerMoves[ki + 1]) score = 40000;
             else score = historyTable[d.piece * 64 + d.to];
         }
         
-        moves[i] = (score << 16) | (moves[i] & 0xFFFF);
+        scores[i] = score;
     }
-    moves.sort((a, b) => b - a);
-    // Restore original moves
-    for (let i = 0; i < moves.length; i++) {
-        moves[i] = moves[i] & 0xFFFF;
+    
+    // Sort moves by score (descending)
+    for (let i = 0; i < moves.length - 1; i++) {
+        for (let j = i + 1; j < moves.length; j++) {
+            if (scores[j] > scores[i]) {
+                const tmpScore = scores[i];
+                scores[i] = scores[j];
+                scores[j] = tmpScore;
+                const tmpMove = moves[i];
+                moves[i] = moves[j];
+                moves[j] = tmpMove;
+            }
+        }
     }
 }
 
